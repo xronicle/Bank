@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<style>
+  /* Больше НЕ полагаемся на проценты/vh для размера canvas — это оказалось
+     ненадёжно внутри WebView (в зависимости от момента построения layout
+     чтение размеров контейнера могло дать 0 или устаревшее значение, и
+     Chart.js с responsive:true рисовал в canvas нулевого размера — отсюда
+     то обрезанный, то вовсе пропавший график). Вместо этого ниже, в JS,
+     размер canvas выставляется ЯВНО в пикселях через window.innerWidth/
+     innerHeight — это единственные значения, которые WebView гарантированно
+     обновляет к моменту выполнения скрипта, независимо от CSS-раскладки.
+  */
+  html, body { margin: 0; padding: 0; background: transparent; overflow: hidden; }
+  canvas { display: block; }
+</style>
+</head>
+<body>
+<canvas id="rateChart"></canvas>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.3/chart.umd.min.js"></script>
+<script>
+  // Один экземпляр графика; данные обновляются из Kotlin через
+  // webView.evaluateJavascript("updateChart(...)"), см. RatesChartWebView.kt.
+  //
+  // Если CDN недоступен (нет сети на устройстве во время защиты и т.п.),
+  // Chart.js не подгрузится и window.Chart будет undefined — в этом случае
+  // рисуем упрощённый линейный график вручную через Canvas 2D API, чтобы
+  // экран никогда не оставался просто белым.
+  let chart;
+  let pending = null; // последние данные, если Chart.js ещё не готов
+
+  function viewportSize() {
+    // window.innerWidth/innerHeight — самые надёжные значения размера
+    // видимой области WebView, не зависят от CSS-раскладки html/body.
+    return {
+      w: window.innerWidth || 320,
+      h: window.innerHeight || 140
+    };
+  }
+
+  function drawFallback(labels, values, accentColor) {
+    const canvasEl = document.getElementById('rateChart');
+    const dpr = window.devicePixelRatio || 1;
+    const { w, h } = viewportSize();
+    canvasEl.style.width = w + 'px';
+    canvasEl.style.height = h + 'px';
+    canvasEl.width = Math.round(w * dpr);
+    canvasEl.height = Math.round(h * dpr);
+    const ctx = canvasEl.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, w, h);
+    if (!values || values.length < 2) return;
+
+    const min = Math.min.apply(null, values);
+    const max = Math.max.apply(null, values);
+    const range = (max - min) || 1;
+    const pad = 8;
+
+    ctx.beginPath();
+    values.forEach((v, i) => {
+      const x = pad + (i / (values.length - 1)) * (w - pad * 2);
+      const y = h - pad - ((v - min) / range) * (h - pad * 2);
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    });
+    ctx.strokeStyle = accentColor;
+    ctx.lineWidth = 2;
+    ctx.lineJoin = 'round';
+    ctx.stroke();
+  }
+
+  function initChart(labels, values, accentColor) {
+    if (typeof Chart === 'undefined') {
+      // Библиотека не загрузилась — используем резервную отрисовку.
+      drawFallback(labels, values, accentColor);
+      return;
+    }
+    const canvasEl = document.getElementById('rateChart');
+    const { w, h } = viewportSize();
+    canvasEl.style.width = w + 'px';
+    canvasEl.style.height = h + 'px';
+
+    chart = new Chart(canvasEl.getContext('2d'), {
+      type: 'line',
+      data: {
+        labels: labels,
+        datasets: [{
+          data: values,
+          borderColor: accentColor,
+          borderWidth: 2,
+          pointRadius: 0,
+          tension: 0.35,
+          fill: false
+        }]
+      },
+      options: {
+        // responsive:false + явный width/height в конфиге — Chart.js больше
+        // не пытается сам угадывать размер контейнера через ResizeObserver,
+        // а рисует ровно в тот размер, который мы ему явно передали.
+        responsive: false,
+        maintainAspectRatio: false,
+        width: w,
+        height: h,
+        plugins: { legend: { display: false }, tooltip: { enabled: true } },
+        scales: { x: { display: false }, y: { display: false } }
+      }
+    });
+  }
+
+  function updateChart(labels, values, accentColor) {
+    pending = { labels, values, accentColor };
+    if (typeof Chart === 'undefined') {
+      drawFallback(labels, values, accentColor);
+      return;
+    }
+    if (!chart) { initChart(labels, values, accentColor); return; }
+    chart.data.labels = labels;
+    chart.data.datasets[0].data = values;
+    chart.data.datasets[0].borderColor = accentColor;
+    chart.update();
+  }
+
+  // Если скрипт Chart.js подгрузится с задержкой уже после первого
+  // updateChart(...), переинициализируем настоящий график с теми же данными.
+  window.addEventListener('load', () => {
+    if (typeof Chart !== 'undefined' && pending && !chart) {
+      initChart(pending.labels, pending.values, pending.accentColor);
+    }
+  });
+
+  // При повороте экрана / изменении размера WebView — пересчитываем размер
+  // canvas и перерисовываем (для Chart.js — через встроенный resize()).
+  window.addEventListener('resize', () => {
+    const { w, h } = viewportSize();
+    if (chart) {
+      chart.resize(w, h);
+    } else if (pending) {
+      drawFallback(pending.labels, pending.values, pending.accentColor);
+    }
+  });
+</script>
+</body>
+</html>
